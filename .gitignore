@@ -2,3 +2,5 @@
 **
 !*.c
 !.gitignore
+!*md
+!LICENSE
