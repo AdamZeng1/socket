@@ -10,11 +10,11 @@ int main(int argc, char **argv) {
     int status;
     pid_t pid = fork();
 
-    if (pid == 0) {
+    if (pid == 0) { /** child process running area */
         sleep(15);
         return 24;
-    } else {
-        while (!waitpid(-1, &status, WNOHANG)) {
+    } else { /** waitpid wait for child process produce SIGCHLD signal Asynchrony */
+        while (!waitpid(-1, &status, WNOHANG)) { /** main process running area */
             sleep(3);
             puts("sleep 3 seconds");
         }
