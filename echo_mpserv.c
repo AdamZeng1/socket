@@ -12,6 +12,8 @@
 #include <sys/socket.h>
 
 #define BUF_SIZE 30
+#define TRUE 1
+#define FALSE 1
 
 void error_handling(char *message);
 
@@ -21,10 +23,11 @@ int main(int argc, char **argv) {
     pid_t pid;
     int serv_sock, clnt_sock;
     char message[BUF_SIZE];
-    int str_len, state;
+    int str_len, state, optlen, option;
     socklen_t adr_sz;
     struct sockaddr_in serv_adr, clnt_adr;
     struct sigaction act;
+
 
     if (argc != 2) {
         printf("Usage : %s <port>\n", argv[0]);
@@ -39,6 +42,10 @@ int main(int argc, char **argv) {
     if (serv_sock == -1) {
         error_handling("socket() error");
     }
+
+    optlen = sizeof(option);
+    option = TRUE;
+    setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, (void *) &option, optlen);
 
     memset(&serv_adr, 0, sizeof(serv_adr));
     serv_adr.sin_family = AF_INET;
