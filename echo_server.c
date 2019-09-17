@@ -9,6 +9,9 @@
 #include <sys/socket.h>
 
 #define BUF_SIZE 1024
+#define TRUE 1
+#define FALSE 1
+
 
 void error_handling(char *message);
 
@@ -16,6 +19,7 @@ int main(int argc, char **argv) {
     int serv_sock, clnt_sock;
     char message[BUF_SIZE];
     int str_len, i;
+    int option,optlen;
 
     struct sockaddr_in serv_adr, clnt_adr;
     socklen_t clnt_adr_sz;
@@ -29,6 +33,11 @@ int main(int argc, char **argv) {
     if (serv_sock == -1) {
         error_handling("socket() error");
     }
+
+    optlen = sizeof(option);
+    option = TRUE;
+    // 防止端口占用
+    setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, (void *) &option, optlen);
 
     memset(&serv_adr, 0, sizeof(serv_adr));
     serv_adr.sin_family = AF_INET;
@@ -54,6 +63,7 @@ int main(int argc, char **argv) {
         }
 
         while ((str_len = read(clnt_sock, message, BUF_SIZE)) != 0) {
+            printf("%s",message);
             write(clnt_sock, message, str_len);
         }
 
