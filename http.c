@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include<signal.h>
 
 
 #define BUF_SIZE 1024
@@ -20,6 +21,12 @@
 #define MAXBUF 8192
 
 #define RIO_BUFSIZE 8192
+
+#define M_GET 0
+#define M_POST 1
+#define M_HEAD 2
+#define M_NONE -1
+
 
 extern char **environ;
 typedef struct {
@@ -35,7 +42,7 @@ ssize_t rio_readlineb(rio_t *rp, void *usrbuf, size_t maxlen);
 
 static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n);
 
-void read_requesthdrs(rio_t *rp);
+int read_requesthdrs(rio_t *rp, char *content, char *requestMethod);
 
 void doit(int fd);
 
@@ -45,13 +52,23 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n);
 
 void get_filetype(char *filename, char *filetype);
 
-void serv_static(int fd, char *filename, int filesize);
+void serv_static(int fd, char *filename, int filesize, char *requestMethod);
 
 int parse_uri(char *uri, char *filename, char *cgiargs);
 
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void serv_dynamic(int fd, char *filename, char *cgiargs, char *requestMethod);
 
-void serv_dynamic(int fd, char *filename, char *cgiargs);
+void echo(int connfd);
+
+void sig_child(int num);
+
+ssize_t rio_readn(int fd, void *usrbuf, size_t n);
+
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg, char *requestMethod);
+
+ssize_t rio_readnb(rio_t *rp, void *usrbuf, size_t n);
+
+int childEnded;
 
 int main(int argc, char **argv) {
 
@@ -69,6 +86,7 @@ int main(int argc, char **argv) {
     socklen_t client_addr_size = sizeof(client_addr);
 
     while (1) {
+        childEnded = 0;
         int client_conn = accept(connection, (struct sockaddr *) &client_addr, &client_addr_size);
         getnameinfo((struct sockaddr *) &client_addr, client_addr_size, hostname, 64, port, 64, 0);
         if (client_conn == -1) {
@@ -77,10 +95,11 @@ int main(int argc, char **argv) {
             printf("Connected client: %s %s \n", hostname, port);
         }
         doit(client_conn);
+//        echo(client_conn);
         close(client_conn);
     }
-
 }
+
 
 int listenToPort(int port) {
     int serv_sock;
@@ -99,7 +118,7 @@ int listenToPort(int port) {
     setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, (void *) &option, optlen);
 
     memset(&serv_adr, 0, sizeof(serv_adr));
-    serv_adr.sin_family = PF_INET;//IPV4
+    serv_adr.sin_family = PF_INET;//IPv4
     serv_adr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_adr.sin_port = htons(port);
 
@@ -121,6 +140,10 @@ void doit(int fd) {
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     rio_t rio;
 
+    /** post method */
+    int contentlen;
+    char post_content[MAXLINE];
+
     char filename[MAXLINE], cgiargs[MAXLINE];
     rio_readinitb(&rio, fd);
     rio_readlineb(&rio, buf, MAXLINE);
@@ -128,20 +151,20 @@ void doit(int fd) {
     printf("%s", buf);
     sscanf(buf, "%s %s %s", method, uri, version);
 
-    if (strcasecmp(method, "GET")) {
-        printf("method error");
+    if (strcasecmp(method, "GET") == 1 && strcasecmp(method, "HEAD") == 1 && strcasecmp(method, "POST") == 1) {
+        clienterror(fd, method, "501", "Not Implemented", "Tiny does not implement this method", method);
         return;
     }
 
     // show request line and request header
-    read_requesthdrs(&rio);
+    contentlen = read_requesthdrs(&rio, post_content, method);
 
     /** Parse URI from GET request */
     is_static = parse_uri(uri, filename, cgiargs);
     /** put file with filename in sbuf struct*/
     if (stat(filename, &sbuf) < 0) {
         clienterror(fd, filename, "404", "Not found",
-                    "Tiny couldn't find this file");
+                    "Tiny couldn't find this file", method);
         return;
     }
     /** serve static content */
@@ -154,16 +177,19 @@ void doit(int fd) {
     // S_ISSOCK(m) socket?  (Not in POSIX.1-1996.)
     if (is_static) { /** serve static file */
         if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
-            clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
+            clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file", method);
             return;
         }
-        serv_static(fd, filename, sbuf.st_size);
+        serv_static(fd, filename, sbuf.st_size, method);
     } else { /** serve dynamic content */
         if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
-            clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program");
+            clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program", method);
             return;
         }
-        serv_dynamic(fd, filename, cgiargs);
+        if (strcasecmp(method, "POST") == 0) {
+            strcpy(cgiargs, post_content);
+        }
+        serv_dynamic(fd, filename, cgiargs, method);
     }
 }
 
@@ -223,6 +249,44 @@ ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n) {
     return cnt;
 }
 
+ssize_t rio_readnb(rio_t *rp, void *usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nread;
+    char *bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nread = rio_read(rp, bufp, nleft)) < 0) {
+            if (errno == EINTR) /* interrupted by sig handler return */
+                nread = 0;      /* call read() again */
+            else
+                return -1;      /* errno set by read() */
+        } else if (nread == 0)
+            break;              /* EOF */
+        nleft -= nread;
+        bufp += nread;
+    }
+    return (n - nleft);         /* return >= 0 */
+}
+
+ssize_t rio_readn(int fd, void *usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nread;
+    char *bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nread = read(fd, bufp, nleft)) < 0) {
+            if (errno == EINTR) /* interrupted by sig handler return */
+                nread = 0;      /* and call read() again */
+            else
+                return -1;      /* errno set by read() */
+        } else if (nread == 0)
+            break;              /* EOF */
+        nleft -= nread;
+        bufp += nread;
+    }
+    return (n - nleft);         /* return >= 0 */
+}
+
 ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
     size_t nleft = n;
     ssize_t nwritten;
@@ -241,18 +305,42 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
     return n;
 }
 
-void read_requesthdrs(rio_t *rp) {
+void echo(int fd) {
+    size_t n;
     char buf[MAXLINE];
-    rio_readlineb(rp, buf, MAXLINE);
+    rio_t rio;
+    rio_readinitb(&rio, fd);
     while (strcmp(buf, "\r\n")) {
-        rio_readlineb(rp, buf, MAXLINE);
+        rio_readlineb(&rio, buf, MAXLINE);
         printf("%s", buf);
     }
     return;
 }
 
+int read_requesthdrs(rio_t *rp, char *content, char *requestMethod) {
+    char buf[MAXLINE];
+    int contentLength = 0;
 
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg) {
+    rio_readlineb(rp, buf, MAXLINE);
+    while (strcmp(buf, "\r\n")) {
+        rio_readlineb(rp, buf, MAXLINE);
+        printf("%s", buf);
+        if (strcasecmp(requestMethod, "POST") == 0 && strstr(buf, "Content-Length:") == buf) {
+            contentLength = atoi(buf + strlen("Content-Length: "));
+            printf("%d\n", contentLength);
+        }
+    }
+
+    if (strcasecmp(requestMethod, "POST") == 0) {
+
+        contentLength = rio_readnb(rp, content, contentLength);
+        content[contentLength] = '\0';
+        printf("POST_CONTENT:%s\n", content);
+    }
+    return contentLength;
+}
+
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg, char *requestMethod) {
     char buf[MAXLINE], body[MAXBUF];
 
     /** Build the HTTP response body */
@@ -269,7 +357,9 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
     rio_writen(fd, buf, strlen(buf));
     sprintf(buf, "Content-length: %d\r\n\r\n", (int) strlen(body));
     rio_writen(fd, buf, strlen(buf));
-    rio_writen(fd, body, strlen(body));
+    if (strcasecmp(requestMethod, "HEAD") != 0) {
+        rio_writen(fd, body, strlen(body));
+    }
 }
 
 int parse_uri(char *uri, char *filename, char *cgiargs) {
@@ -298,7 +388,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 }
 
 
-void serv_static(int fd, char *filename, int filesize) {
+void serv_static(int fd, char *filename, int filesize, char *requestMethod) {
     int srcfd;
     char *srcp, filetype[MAXLINE], buf[MAXBUF];
 
@@ -313,6 +403,10 @@ void serv_static(int fd, char *filename, int filesize) {
     printf("Response headers:\n");
     printf("%s", buf);
 
+    if (!strcasecmp(requestMethod, "HEAD")) {
+        return;
+    }
+
     /** Send response body to client */
     srcfd = open(filename, O_RDONLY, 0);
     // PROT_READ  Pages may be read.
@@ -322,22 +416,40 @@ void serv_static(int fd, char *filename, int filesize) {
     //  file, and are not carried through to the underlying file.  It
     //  is unspecified whether changes made to the file after the
     //  mmap() call are visible in the mapped region.
-    srcp = mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+//    srcp = mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+    srcp = (char *) malloc(sizeof(char) * filesize);
     // srcp points to area which contain the filename in the memory
+    rio_readn(srcfd, srcp,
+              filesize); // read from file pointer srcfd to char pointer srcp which is allocated in memory before
     close(srcfd);
     rio_writen(fd, srcp, filesize);
-    munmap(srcp, filesize);
+//    munmap(srcp, filesize);
+    free(srcp);
 }
 
-void serv_dynamic(int fd, char *filename, char *cgiargs) {
+void serv_dynamic(int fd, char *filename, char *cgiargs, char *requestMethod) {
 
     char buf[MAXLINE], *emptylist[] = {NULL};
+    struct sigaction sigact;
+//    sigact.sa_handler = sig_child;//信号响应函数
+//    sigact.sa_flags = 0;//选择第一种函数类型(根据 struct sigaction 结构体来的)
+//    sigemptyset(&sigact.sa_mask);//置0,SIGCHLD 默认是忽略的
+//    sigaction(SIGCHLD, &sigact, NULL);  //注册信号
+    signal(SIGCHLD, sig_child);
 
     /** Return first part of HTTP response */
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
     rio_writen(fd, buf, strlen(buf));
     sprintf(buf, "Server: Tiny Web server\r\n");
     rio_writen(fd, buf, strlen(buf));
+
+    if (!strcasecmp(requestMethod, "HEAD")) {
+        return;
+    }
+
+
+    setenv("QUERY_STRING", cgiargs, 1);
+    printf("%s\n", cgiargs);
 
     if (fork() == 0) { // child process
         // The setenv() function adds the variable name to the environment with
@@ -348,10 +460,11 @@ void serv_dynamic(int fd, char *filename, char *cgiargs) {
         // copies of the strings pointed to by name and value (by contrast with
         // putenv(3)).
         setenv("QUERY_STRING", cgiargs, 1);
+        printf("%s\n", cgiargs);
         dup2(fd, STDOUT_FILENO); /** redirect stdout to client */
         execve(filename, emptylist, environ); /** Run CGI program */
     }
-    wait(NULL);
+    while (!childEnded) pause();
 }
 
 
@@ -367,8 +480,23 @@ void get_filetype(char *filename, char *filetype) {
         strcpy(filetype, "image/png");
     } else if (strstr(filename, ".jpg")) {
         strcpy(filetype, "image/jpeg");
+    } else if (strstr(filename, ".mpg")) {
+        strcpy(filetype, "video/mpeg");
     } else {
         strcpy(filetype, "text/plain");
     }
+}
+
+void sig_child(int num) {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) { // recycling child process using unblock way
+        if (WIFEXITED(status)) {
+            printf("child %d exit %d\n", pid, WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            printf("child %d cancel signal %d\n", pid, WTERMSIG(status));
+        }
+    }
+    childEnded = 1;
 }
 
