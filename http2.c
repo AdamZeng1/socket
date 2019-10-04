@@ -1,3 +1,7 @@
+//
+// Created by adamzeng on 2019-09-26.
+//
+
 #include <stdio.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -36,18 +40,6 @@ typedef struct {
     char rio_buf[RIO_BUFSIZE]; /* internal buffer */
 } rio_t;
 
-typedef struct { /** Represents a pool of connected descriptor */
-    int maxfd; /** Largest descriptor in read_set */
-    fd_set read_set; /** Set of all descriptors */
-    fd_set ready_set;/** Subset of descriptors ready for reading */
-    int nready; /** Number of descriptors from select */
-    int maxi; /** High water index into client array */
-    int clientfd[FD_SETSIZE]; /** Set of active descriptor */
-    rio_t clientrio[FD_SETSIZE];/** Set of active read buffers */
-} pool;
-
-void add_client(int connfd, pool *p);
-
 void rio_readinitb(rio_t *rp, int fd);
 
 ssize_t rio_readlineb(rio_t *rp, void *usrbuf, size_t maxlen);
@@ -56,7 +48,7 @@ static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n);
 
 int read_requesthdrs(rio_t *rp, char *content, char *requestMethod);
 
-void doit(int fd, rio_t *rio);
+void doit(int fd);
 
 int listenToPort(int port);
 
@@ -80,13 +72,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
 
 ssize_t rio_readnb(rio_t *rp, void *usrbuf, size_t n);
 
-void init_pool(int listenfd, pool *p);
-
-void check_clients(pool *p);
-
 int childEnded;
-
-int byte_cnt = 0;
 
 int main(int argc, char **argv) {
 
@@ -97,114 +83,27 @@ int main(int argc, char **argv) {
         printf("Usage: %s <port>\n", argv[0]);
         exit(1);
     }
-    static pool pool;
 
-    int listenfd = listenToPort(atoi(argv[1]));
-    init_pool(listenfd, &pool);
+    int connection = listenToPort(atoi(argv[1]));
+
     struct sockaddr_in client_addr;
     socklen_t client_addr_size = sizeof(client_addr);
 
-    int connfd;
-
     while (1) {
-        /** wait for listening/connected descriptor(s) to become ready */
-        pool.ready_set = pool.read_set;
-        pool.nready = select(pool.maxfd + 1, &pool.ready_set, NULL, NULL, NULL);
-        printf("nready: %d\n",pool.nready);
-
         childEnded = 0;
-        /** if listening descriptor ready, add new client to the pool */
-        if (FD_ISSET(listenfd, &pool.ready_set)) {
-            connfd = accept(listenfd, (struct sockaddr *) &client_addr, &client_addr_size);
-            add_client(connfd, &pool);
-            getnameinfo((struct sockaddr *) &client_addr, client_addr_size, hostname, 64, port, 64, 0);
-            if (connfd == -1) {
-                printf("accept() error");
-            } else {
-                printf("Connected client: %s %s \n", hostname, port);
-            }
+        int client_conn = accept(connection, (struct sockaddr *) &client_addr, &client_addr_size);
+        getnameinfo((struct sockaddr *) &client_addr, client_addr_size, hostname, 64, port, 64, 0);
+        if (client_conn == -1) {
+            printf("accept() error");
+        } else {
+            printf("Connected client: %s %s \n", hostname, port);
         }
-
-        /** send html or dynamic content from each ready connected descriptor */
-        check_clients(&pool);
-        close(connfd);
+        doit(client_conn);
+//        echo(client_conn);
+        close(client_conn);
     }
 }
 
-
-void check_clients(pool *p) {
-    int i, connfd, n;
-    char buf[MAXLINE];
-    rio_t rio;
-
-//    printf("Hello World\n");
-
-//    printf("%d\n",p->maxi);
-//    printf("%d\n",p->nready);
-    /** nready > 0 means already have file descriptor in ready set */
-    for (i = 0; (i <= p->maxi); ++i) {
-        connfd = p->clientfd[i];
-        rio = p->clientrio[i];
-        /** If the descriptor is ready, echo a text from it */
-        if ((connfd > 0) && (FD_ISSET(connfd, &p->ready_set))) {
-//            p->nready--;
-            doit(connfd, &rio);
-            if ((n = rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-                byte_cnt += n;
-                printf("Server received %d (%d total) bytes on fd %d\n", n, byte_cnt, connfd);
-                printf("message from client %d: %s", connfd, buf);
-                rio_writen(connfd, buf, (size_t) n);
-            } else { /** EOF detected, remove descriptor from pool */
-                close(connfd);
-                FD_CLR(connfd, &p->read_set);
-                p->clientfd[i] = -1;
-            }
-        }
-    }
-}
-
-
-void init_pool(int listenfd, pool *p) {
-    /** Initially, there are no connected descriptor */
-    int i;
-    p->maxi = -1;
-    /** Initially, all element in clientfd array is zero */
-    for (i = 0; i < FD_SETSIZE; ++i) {
-        p->clientfd[i] = -1;
-    }
-
-    /** Initially, listenfd is only member of select read set */
-    p->maxfd = listenfd;
-    FD_ZERO(&p->read_set);
-    FD_SET(listenfd, &p->read_set);
-}
-
-void add_client(int connfd, pool *p) {
-    int i;
-//    p->nready--;
-    /** iterate the clientfd array */
-    for (i = 0; i < FD_SETSIZE; ++i) { /** find a available slot */
-        if (p->clientfd[i] < 0) {
-            /** Add descriptor to descriptor pool */
-            p->clientfd[i] = connfd;
-            rio_readinitb(&p->clientrio[i], connfd);
-            /** Add the descriptor to the descriptor set */
-            FD_SET(connfd, &p->read_set);
-            /** Update max descriptor and pool high water mark */
-            if (connfd > p->maxfd) {
-                p->maxfd = connfd;
-            }
-            /** max index in clientfd */
-            if (i > p->maxi) {
-                p->maxi = i;
-            }
-            break;
-        }
-    }
-    if (i == FD_SETSIZE) { /** Couldn't find an empty slot */
-        printf("add_client error: Too many clients");
-    }
-}
 
 int listenToPort(int port) {
     int serv_sock;
@@ -239,19 +138,19 @@ int listenToPort(int port) {
 
 }
 
-void doit(int fd,rio_t *rio) {
+void doit(int fd) {
     int is_static;
     struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-//    rio_t rio;
+    rio_t rio;
 
     /** post method */
     int contentlen;
     char post_content[MAXLINE];
 
     char filename[MAXLINE], cgiargs[MAXLINE];
-    rio_readinitb(rio, fd);
-    rio_readlineb(rio, buf, MAXLINE);
+    rio_readinitb(&rio, fd);
+    rio_readlineb(&rio, buf, MAXLINE);
     printf("Request headers:\n");
     printf("%s", buf);
     sscanf(buf, "%s %s %s", method, uri, version);
@@ -262,7 +161,7 @@ void doit(int fd,rio_t *rio) {
     }
 
     // show request line and request header
-    contentlen = read_requesthdrs(rio, post_content, method);
+    contentlen = read_requesthdrs(&rio, post_content, method);
 
     /** Parse URI from GET request */
     is_static = parse_uri(uri, filename, cgiargs);
@@ -604,4 +503,3 @@ void sig_child(int num) {
     }
     childEnded = 1;
 }
-
