@@ -369,12 +369,13 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
 int parse_uri(char *uri, char *filename, char *cgiargs) {
     char *ptr;
 
-    if (!strstr(uri, "cgi-bin")) { /* Static content */
+    if (!strstr(uri, "cgi-bin")) { /** Static content */
         strcpy(cgiargs, "");
         strcpy(filename, ".");
         strcat(filename, uri);
         if (uri[strlen(uri) - 1] == '/') {
             strcat(filename, "home.html");
+            fprintf(stdout,"%s \n",filename);
         }
         return 1;
     } else { /** Dynamic content */
@@ -387,6 +388,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
         }
         strcpy(filename, ".");
         strcat(filename, uri);
+        fprintf(stdout,"%s \n",filename);
         return 0;
     }
 }

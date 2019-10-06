@@ -65,7 +65,6 @@ char *tfgets(char *s, int size, FILE *stream) {
         return threadBuf;
     };
 
-
 }
 
 /** Thread Routine */
