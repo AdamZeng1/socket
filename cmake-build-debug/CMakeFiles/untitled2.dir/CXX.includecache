@@ -1,0 +1,38 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/Users/adamzeng/CLionProjects/untitled2/question.cpp
+stdio.h
+-
+sys/socket.h
+-
+arpa/inet.h
+-
+stdlib.h
+-
+string.h
+-
+unistd.h
+-
+netdb.h
+-
+sys/stat.h
+-
+sys/errno.h
+-
+fcntl.h
+-
+sys/mman.h
+-
+unistd.h
+-
+signal.h
+-
+algorithm
+-
+
